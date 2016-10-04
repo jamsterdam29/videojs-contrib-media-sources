@@ -62,14 +62,22 @@ const durationOfVideo = function(duration) {
 const addTextTrackData = function(sourceHandler, captionArray, metadataArray) {
   let Cue = window.WebKitDataCue || window.VTTCue;
 
+  //JDA change
   if (captionArray) {
     captionArray.forEach(function(caption) {
-      this.inbandTextTrack_.addCue(
-        new Cue(
+      var capCue = new Cue(
           caption.startTime + this.timestampOffset,
           caption.endTime + this.timestampOffset,
           caption.text
-        ));
+        );
+
+      capCue.line = caption.line;
+      capCue.snapToLines = caption.snapToLines;
+      capCue.align = caption.align;
+      capCue.position = caption.position;
+
+      this.inbandTextTrack_.addCue(capCue);
+        
     }, sourceHandler);
   }
 
