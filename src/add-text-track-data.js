@@ -75,6 +75,8 @@ const addTextTrackData = function(sourceHandler, captionArray, metadataArray) {
       capCue.snapToLines = caption.snapToLines;
       capCue.align = caption.align;
       capCue.position = caption.position;
+      capCue.positionAlign = caption.positionAlign;
+      capCue.size = caption.size;
 
       this.inbandTextTrack_.addCue(capCue);
         
