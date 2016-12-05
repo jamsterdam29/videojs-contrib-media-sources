@@ -64,22 +64,23 @@ const addTextTrackData = function(sourceHandler, captionArray, metadataArray) {
 
   //JDA change
   if (captionArray) {
-    captionArray.forEach(function(caption) {
-      var capCue = new Cue(
-          caption.startTime + this.timestampOffset,
-          caption.endTime + this.timestampOffset,
-          caption.text
-        );
+    captionArray.forEach(function (caption) {
+      if (caption.type != 'cea608') {
+        var capCue = new Cue(caption.startTime + this.timestampOffset, caption.endTime + this.timestampOffset, caption.text);
 
-      capCue.line = caption.line;
-      capCue.snapToLines = caption.snapToLines;
-      capCue.align = caption.align;
-      capCue.position = caption.position;
-      capCue.positionAlign = caption.positionAlign;
-      capCue.size = caption.size;
+        capCue.line = caption.line;
+        capCue.snapToLines = caption.snapToLines;
+        capCue.align = caption.align;
+        capCue.position = caption.position;
+        capCue.positionAlign = caption.positionAlign;
+        capCue.size = caption.size;
 
-      this.inbandTextTrack_.addCue(capCue);
-        
+        this.inbandTextTrack_.addCue(capCue);
+      }
+      else {
+        //console.log('[JDA] addTextTrackData - capArr:%o 608:%o', caption, caption.cea608);
+        window.receive608(caption.startTime, caption.cea608);
+      }
     }, sourceHandler);
   }
 
