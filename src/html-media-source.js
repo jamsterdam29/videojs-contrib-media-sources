@@ -6,26 +6,13 @@ import document from 'global/document';
 import videojs from 'video.js';
 import VirtualSourceBuffer from './virtual-source-buffer';
 import {durationOfVideo} from './add-text-track-data';
-import {isAudioCodec, isVideoCodec, parseContentType} from './codec-utils';
-
-/**
- * Replace the old apple-style `avc1.<dd>.<dd>` codec string with the standard
- * `avc1.<hhhhhh>`
- *
- * @param {Array} codecs an array of codec strings to fix
- * @return {Array} the translated codec array
- * @private
- */
-const translateLegacyCodecs = function(codecs) {
-  return codecs.map((codec) => {
-    return codec.replace(/avc1\.(\d+)\.(\d+)/i, function(orig, profile, avcLevel) {
-      let profileHex = ('00' + Number(profile).toString(16)).slice(-2);
-      let avcLevelHex = ('00' + Number(avcLevel).toString(16)).slice(-2);
-
-      return 'avc1.' + profileHex + '00' + avcLevelHex;
-    });
-  });
-};
+import {
+  isAudioCodec,
+  isVideoCodec,
+  parseContentType,
+  translateLegacyCodecs
+} from './codec-utils';
+import {cleanupTextTracks} from './cleanup-text-tracks';
 
 /**
  * Our MediaSource implementation in HTML, mimics native
@@ -132,6 +119,8 @@ export default class HtmlMediaSource extends videojs.EventTarget {
         //      what stream is the video stream, rather than relying on videoTracks
         /* eslinst-enable */
 
+        sourceBuffer.appendAudioInitSegment_ = true;
+
         if (sourceBuffer.videoCodec_ && sourceBuffer.audioCodec_) {
           // combined
           sourceBuffer.audioDisabled_ = combined;
@@ -150,6 +139,12 @@ export default class HtmlMediaSource extends videojs.EventTarget {
         }
 
         this.activeSourceBuffers_.push(sourceBuffer);
+      });
+    };
+
+    this.onPlayerMediachange_ = () => {
+      this.sourceBuffers.forEach((sourceBuffer) => {
+        sourceBuffer.appendAudioInitSegment_ = true;
       });
     };
 
@@ -179,6 +174,8 @@ export default class HtmlMediaSource extends videojs.EventTarget {
         this.player_.audioTracks().on('addtrack', this.updateActiveSourceBuffers_);
         this.player_.audioTracks().on('removetrack', this.updateActiveSourceBuffers_);
       }
+
+      this.player_.on('mediachange', this.onPlayerMediachange_);
     });
 
     this.on('sourceended', (event) => {
@@ -186,9 +183,9 @@ export default class HtmlMediaSource extends videojs.EventTarget {
 
       for (let i = 0; i < this.sourceBuffers.length; i++) {
         let sourcebuffer = this.sourceBuffers[i];
-        let cues = sourcebuffer.metadataTrack_.cues;
+        let cues = sourcebuffer.metadataTrack_ && sourcebuffer.metadataTrack_.cues;
 
-        if (cues) {
+        if (cues && cues.length) {
           cues[cues.length - 1].endTime = duration;
         }
       }
@@ -202,15 +199,26 @@ export default class HtmlMediaSource extends videojs.EventTarget {
           sourceBuffer.transmuxer_.terminate();
         }
       });
+
       this.sourceBuffers.length = 0;
       if (!this.player_) {
         return;
       }
 
+      cleanupTextTracks(this.player_);
+
       if (this.player_.audioTracks && this.player_.audioTracks()) {
         this.player_.audioTracks().off('change', this.updateActiveSourceBuffers_);
         this.player_.audioTracks().off('addtrack', this.updateActiveSourceBuffers_);
         this.player_.audioTracks().off('removetrack', this.updateActiveSourceBuffers_);
+      }
+
+      // We can only change this if the player hasn't been disposed of yet
+      // because `off` eventually tries to use the el_ property. If it has
+      // been disposed of, then don't worry about it because there are no
+      // event handlers left to unbind anyway
+      if (this.player_.el_) {
+        this.player_.off('mediachange', this.onPlayerMediachange_);
       }
     });
   }

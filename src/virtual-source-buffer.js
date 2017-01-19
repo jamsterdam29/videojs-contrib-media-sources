@@ -33,6 +33,7 @@ export default class VirtualSourceBuffer extends videojs.EventTarget {
     this.audioCodec_ = null;
     this.videoCodec_ = null;
     this.audioDisabled_ = false;
+    this.appendAudioInitSegment_ = true;
 
     let options = {
       remux: false
@@ -70,6 +71,7 @@ export default class VirtualSourceBuffer extends videojs.EventTarget {
       set(val) {
         if (typeof val === 'number' && val >= 0) {
           this.timestampOffset_ = val;
+          this.appendAudioInitSegment_ = true;
 
           // We have to tell the transmuxer to set the baseMediaDecodeTime to
           // the desired timestampOffset for the next segment
@@ -210,6 +212,12 @@ export default class VirtualSourceBuffer extends videojs.EventTarget {
       segment.data,
       event.data.byteOffset,
       event.data.byteLength
+    );
+
+    segment.initSegment = new Uint8Array(
+      segment.initSegment.data,
+      segment.initSegment.byteOffset,
+      segment.initSegment.byteLength
     );
 
     createTextTracksIfNecessary(this, this.mediaSource_, segment);
@@ -382,9 +390,12 @@ export default class VirtualSourceBuffer extends videojs.EventTarget {
     sortedSegments = this.pendingBuffers_.reduce(function(segmentObj, segment) {
       let type = segment.type;
       let data = segment.data;
+      let initSegment = segment.initSegment;
 
       segmentObj[type].segments.push(data);
       segmentObj[type].bytes += data.byteLength;
+
+      segmentObj[type].initSegment = initSegment;
 
       // Gather any captions into a single array
       if (segment.captions) {
@@ -425,8 +436,18 @@ export default class VirtualSourceBuffer extends videojs.EventTarget {
       this.mediaSource_.trigger({type: 'videoinfo', info: sortedSegments.video.info});
     }
 
+    if (this.appendAudioInitSegment_) {
+      if (!this.audioDisabled_ && this.audioBuffer_) {
+        sortedSegments.audio.segments.unshift(sortedSegments.audio.initSegment);
+        sortedSegments.audio.bytes += sortedSegments.audio.initSegment.byteLength;
+      }
+      this.appendAudioInitSegment_ = false;
+    }
+
     // Merge multiple video and audio segments into one and append
     if (this.videoBuffer_) {
+      sortedSegments.video.segments.unshift(sortedSegments.video.initSegment);
+      sortedSegments.video.bytes += sortedSegments.video.initSegment.byteLength;
       this.concatAndAppendSegments_(sortedSegments.video, this.videoBuffer_);
       // TODO: are video tracks the only ones with text tracks?
       addTextTrackData(this, sortedSegments.captions, sortedSegments.metadata);
@@ -462,7 +483,16 @@ export default class VirtualSourceBuffer extends videojs.EventTarget {
         offset += segment.byteLength;
       });
 
-      destinationBuffer.appendBuffer(tempBuffer);
+      try {
+        destinationBuffer.appendBuffer(tempBuffer);
+      } catch (error) {
+        if (this.mediaSource_.player_) {
+          this.mediaSource_.player_.error({
+            code: -3,
+            type: 'APPEND_BUFFER_ERR'
+          });
+        }
+      }
     }
   }
 

@@ -4,7 +4,6 @@ import QUnit from 'qunit';
 import sinon from 'sinon';
 import videojs from 'video.js';
 import muxjs from 'mux.js';
-import FlashMediaSource from '../src/flash-media-source';
 import FlashSourceBuffer from '../src/flash-source-buffer';
 import FlashConstants from '../src/flash-constants';
 
@@ -24,6 +23,7 @@ const appendCalls = function(calls) {
 const makeFlvTag = function(pts, data) {
   return {
     pts,
+    dts: pts,
     bytes: data,
     finalize() {
       return this;
@@ -132,7 +132,6 @@ QUnit.module('Flash MediaSource', {
       return true;
     };
 
-    this.oldBPS = FlashMediaSource.BYTES_PER_SECOND_GOAL;
     this.oldFlashTransmuxer = muxjs.flv.Transmuxer;
     muxjs.flv.Transmuxer = MockSegmentParser;
 
@@ -145,6 +144,7 @@ QUnit.module('Flash MediaSource', {
     swfObj = document.createElement('fake-object');
     swfObj.id = 'fake-swf-' + assert.test.testId;
     this.player.el().replaceChild(swfObj, this.player.tech_.el());
+    this.player.tech_.hls = new videojs.EventTarget();
     this.player.tech_.el_ = swfObj;
     swfObj.tech = this.player.tech_;
     swfObj.CallFunction = (xml) => {
@@ -202,7 +202,6 @@ QUnit.module('Flash MediaSource', {
     window.WebKitMediaSource = window.MediaSource;
     this.Flash.isSupported = this.oldFlashSupport;
     this.Flash.canPlaySource = this.oldCanPlay;
-    FlashMediaSource.BYTES_PER_SECOND_GOAL = this.oldBPS;
     muxjs.flv.Transmuxer = this.oldFlashTransmuxer;
     this.player.dispose();
     this.clock.restore();
@@ -251,96 +250,31 @@ QUnit.test('passes bytes to Flash', function() {
             'passed the base64 encoded data');
 });
 
-QUnit.test('size of the append window changes based on timing information', function() {
+QUnit.test('passes chunked bytes to Flash', function() {
   let sourceBuffer = this.mediaSource.addSourceBuffer('video/mp2t');
-  let time = 0;
-  let oldDate = Date;
-  let swfObj = this.mediaSource.swfObj;
-  let callFunction = swfObj.CallFunction;
-  // Set some easy-to-test values
-  let TIME_BETWEEN_TICKS = FlashConstants.TIME_BETWEEN_TICKS;
-  let TIME_PER_TICK = FlashConstants.TIME_PER_TICK;
-  let BYTES_PER_CHUNK = FlashConstants.BYTES_PER_CHUNK;
-  let MIN_CHUNK = FlashConstants.MIN_CHUNK;
-  let MAX_CHUNK = FlashConstants.MAX_CHUNK;
+  let oldChunkSize = FlashConstants.BYTES_PER_CHUNK;
 
-  FlashConstants.TIME_BETWEEN_TICKS = 2;
-  FlashConstants.TIME_PER_TICK = 4;
   FlashConstants.BYTES_PER_CHUNK = 2;
-  FlashConstants.MIN_CHUNK = 1;
-  FlashConstants.MAX_CHUNK = 10;
-
-  sourceBuffer = this.mediaSource.addSourceBuffer('video/mp2t');
-  time = 0;
-  /* eslint-disable no-native-reassign */
-  /* eslint-disable no-undef */
-  oldDate = Date;
-  Date = function() {
-    return {
-      getTime() {
-        return oldDate.now();
-      },
-      valueOf() {
-        return time;
-      }
-    };
-  };
-  /* eslint-enable no-native-reassign */
-  /* eslint-enable no-undef */
-
-  // Replace the CallFunction so that we can increment "time" in response
-  // to appends
-  swfObj.CallFunction = function(xml) {
-    // Take just half a millisecond per append
-    time += 0.5;
-    return callFunction(xml);
-  };
-
-  sourceBuffer.appendBuffer(new Uint8Array(16));
-  timers.runAll();
-
-  QUnit.equal(this.swfCalls.shift().indexOf('load'), 0, 'swf load called');
-  QUnit.equal(this.swfCalls.length, 8, 'called swf once per two-bytes');
-  QUnit.equal(sourceBuffer.chunkSize_, 4, 'sourceBuffer.chunkSize_ doubled');
 
   this.swfCalls.length = 0;
-
-  // Replace the CallFunction so that we can increment "time" in response
-  // to appends
-  swfObj.CallFunction = function(xml) {
-    // Take 2 millisecond per append
-    time += 2;
-    return callFunction(xml);
-  };
-
-  sourceBuffer.appendBuffer(new Uint8Array(16));
+  sourceBuffer.appendBuffer(new Uint8Array([0, 1, 2, 3, 4]));
   timers.runAll();
 
-  QUnit.equal(this.swfCalls.length, 8, 'called swf once per byte');
-  QUnit.equal(this.swfCalls[0].arguments[0].length, 4, 'swf called with 4 bytes');
-  QUnit.equal(this.swfCalls[1].arguments[0].length, 4, 'swf called with 4 bytes twice');
-  QUnit.equal(this.swfCalls[2].arguments[0].length, 2, 'swf called with 2 bytes');
-  QUnit.equal(this.swfCalls[3].arguments[0].length, 2, 'swf called with 2 bytes twice');
-  QUnit.equal(this.swfCalls[4].arguments[0].length, 1, 'swf called with 1 bytes');
-  QUnit.equal(this.swfCalls[5].arguments[0].length, 1, 'swf called with 1 bytes twice');
-  QUnit.equal(this.swfCalls[6].arguments[0].length, 1, 'swf called with 1 bytes thrice');
-  QUnit.equal(
-    this.swfCalls[7].arguments[0].length,
-    1,
-    'swf called with 1 bytes four times'
-  );
-  QUnit.equal(sourceBuffer.chunkSize_, 1, 'sourceBuffer.chunkSize_ reduced to 1');
+  QUnit.ok(this.swfCalls.length, 'the SWF was called');
+  this.swfCalls = appendCalls(this.swfCalls);
+  QUnit.equal(this.swfCalls.length, 3, 'the SWF received 3 chunks');
+  QUnit.strictEqual(this.swfCalls[0].callee, 'vjs_appendBuffer', 'called appendBuffer');
+  QUnit.deepEqual(this.swfCalls[0].arguments[0],
+            [0, 1],
+            'passed the base64 encoded data');
+  QUnit.deepEqual(this.swfCalls[1].arguments[0],
+            [2, 3],
+            'passed the base64 encoded data');
+  QUnit.deepEqual(this.swfCalls[2].arguments[0],
+            [4],
+            'passed the base64 encoded data');
 
-  FlashConstants.TIME_BETWEEN_TICKS = TIME_BETWEEN_TICKS;
-  FlashConstants.TIME_PER_TICK = TIME_PER_TICK;
-  FlashConstants.BYTES_PER_CHUNK = BYTES_PER_CHUNK;
-  FlashConstants.MIN_CHUNK = MIN_CHUNK;
-  FlashConstants.MAX_CHUNK = MAX_CHUNK;
-  /* eslint-disable no-native-reassign */
-  /* eslint-disable no-undef */
-  Date = oldDate;
-  /* eslint-disable no-native-reassign */
-  /* eslint-disable no-undef */
+  FlashConstants.BYTES_PER_CHUNK = oldChunkSize;
 });
 
 QUnit.test('clears the SWF on seeking', function() {
@@ -410,11 +344,12 @@ QUnit.test('drops tags before currentTime when seeking', function() {
             'three tags are appended');
 });
 
-QUnit.test('drops tags before the buffered end always', function() {
+QUnit.test('drops audio and video (complete gops) tags before the buffered end always', function() {
   let sourceBuffer = this.mediaSource.addSourceBuffer('video/mp2t');
   let i = 10;
   let endTime;
-  let tags_ = [];
+  let videoTags_ = [];
+  let audioTags_ = [];
 
   this.mediaSource.tech_.buffered = function() {
     return videojs.createTimeRange([[0, endTime]]);
@@ -425,7 +360,7 @@ QUnit.test('drops tags before the buffered end always', function() {
   sourceBuffer.segmentParser_.trigger('data', {
     tags: {
       videoTags: [makeFlvTag(19 * 1000, new Uint8Array(1))],
-      audioTags: []
+      audioTags: [makeFlvTag(19 * 1000, new Uint8Array(1))]
     }
   });
   timers.runAll();
@@ -436,14 +371,27 @@ QUnit.test('drops tags before the buffered end always', function() {
   // mock out a new segment of FLV tags, starting 10s after the
   // starting PTS value
   while (i--) {
-    tags_.unshift(
+    videoTags_.unshift(
       makeFlvTag((i * 1000) + (29 * 1000),
         new Uint8Array([i])));
   }
+
+  i = 10;
+  while (i--) {
+    audioTags_.unshift(
+      makeFlvTag((i * 1000) + (29 * 1000),
+        new Uint8Array([i + 100])));
+  }
+
+  videoTags_[0].keyFrame = true;
+  videoTags_[3].keyFrame = true;
+  videoTags_[6].keyFrame = true;
+  videoTags_[8].keyFrame = true;
+
   sourceBuffer.segmentParser_.trigger('data', {
     tags: {
-      videoTags: tags_,
-      audioTags: []
+      videoTags: videoTags_,
+      audioTags: audioTags_
     }
   });
 
@@ -453,8 +401,15 @@ QUnit.test('drops tags before the buffered end always', function() {
   this.swfCalls.length = 0;
   timers.runAll();
 
-  QUnit.deepEqual(this.swfCalls[0].arguments[0], [7, 8, 9],
-            'three tags are appended');
+  // end of buffer is 17 seconds
+  // frames 0-6 for video have pts values less than 17 seconds
+  // since frame 6 is a key frame, it should still be appended to preserve the entire gop
+  // so we should have appeneded frames 6 - 9
+  // frames 100-106 for audio have pts values less than 17 seconds
+  // so we should have appended frames 107-109
+  // Append order is 6, 7, 107, 8, 108, 9, 109 since we order tags based on dts value
+  QUnit.deepEqual(this.swfCalls[0].arguments[0], [6, 7, 107, 8, 108, 9, 109],
+            'audio and video tags properly dropped');
 });
 
 QUnit.test('seek targeting accounts for changing timestampOffsets', function() {
@@ -527,7 +482,7 @@ QUnit.test('calling endOfStream sets mediaSource readyState to ended', function(
 
   timers.runAll();
 
-  QUnit.strictEqual(sourceBuffer.mediaSource.readyState,
+  QUnit.strictEqual(sourceBuffer.mediaSource_.readyState,
     'ended',
     'readyState is \'ended\'');
   QUnit.strictEqual(this.swfCalls.length, 2, 'made two calls to swf');
@@ -569,21 +524,15 @@ QUnit.test('opens the stream on sourceBuffer.appendBuffer after endOfStream', fu
         'endOfStream',
         'the second call should be for the updateend');
 
-  sourceBuffer.appendBuffer(new Uint8Array([2]));
-  timers.run(2);
-
-  sourceBuffer.buffer_.push(new Uint8Array([3]));
+  sourceBuffer.appendBuffer(new Uint8Array([2, 3]));
   timers.runAll();
 
-  QUnit.strictEqual(this.swfCalls.length, 2, 'made two appends');
+  QUnit.strictEqual(this.swfCalls.length, 1, 'made one more append');
   QUnit.deepEqual(this.swfCalls.shift().arguments[0],
-            [2],
-            'contains the third byte');
-  QUnit.deepEqual(this.swfCalls.shift().arguments[0],
-            [3],
-            'contains the fourth byte');
+            [2, 3],
+            'contains the third and fourth bytes');
   QUnit.strictEqual(
-    sourceBuffer.mediaSource.readyState,
+    sourceBuffer.mediaSource_.readyState,
     'open',
     'The streams should be open if more bytes are appended to an "ended" stream'
   );
@@ -785,4 +734,73 @@ QUnit.test('fires loadedmetadata after first segment append', function() {
   sourceBuffer.appendBuffer(new Uint8Array([0, 1]));
   timers.runAll();
   QUnit.equal(loadedmetadataCount, 1, 'loadedmetadata does not fire after second append');
+});
+
+QUnit.test('cleans up WebVTT cues on hls dispose', function() {
+  let sourceBuffer = this.mediaSource.addSourceBuffer('video/mp2t');
+
+  let addedTracks = [];
+  let removedTracks = [];
+  let metadata = [{
+    cueTime: 2,
+    frames: [{
+      url: 'This is a url tag'
+    }, {
+      value: 'This is a text tag'
+    }]
+  }, {
+    cueTime: 12,
+    frames: [{
+      data: 'This is a priv tag'
+    }]
+  }];
+  let captions = [{
+    startTime: 1,
+    endTime: 3,
+    text: 'This is an in-band caption'
+  }];
+
+  metadata.dispatchType = 0x10;
+  this.mediaSource.player_ = {
+    addRemoteTextTrack(options) {
+      let trackEl = {
+        track: {
+          kind: options.kind,
+          label: options.label,
+          addCue(cue) {}
+        }
+      };
+
+      addedTracks.push(trackEl.track);
+      return trackEl;
+    },
+    remoteTextTracks() {
+      return addedTracks;
+    },
+    removeRemoteTextTrack(track) {
+      removedTracks.push(track);
+    }
+  };
+
+  sourceBuffer.segmentParser_.trigger('data', {
+    tags: {
+      videoTags: [],
+      audioTags: []
+    },
+    metadata,
+    captions
+  });
+  sourceBuffer.segmentParser_.trigger('done');
+
+  QUnit.equal(addedTracks.length, 2, 'created two text tracks');
+  QUnit.equal(addedTracks.filter(t => ['captions', 'metadata'].indexOf(t.kind) === -1).length,
+              0,
+              'created only the expected two remote TextTracks');
+
+  this.player.tech_.hls.trigger('dispose');
+
+  QUnit.equal(removedTracks.length, 2, 'removed two text tracks');
+  QUnit.equal(removedTracks.filter(t => ['captions', 'metadata'].indexOf(t.kind) === -1).length,
+              0,
+              'removed only the expected two remote TextTracks');
 });

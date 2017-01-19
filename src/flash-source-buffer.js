@@ -19,7 +19,7 @@ import FlashConstants from './flash-constants';
 const scheduleTick = function(func) {
   // Chrome doesn't invoke requestAnimationFrame callbacks
   // in background tabs, so use setTimeout.
-  window.setTimeout(func, FlashConstants.TIME_BETWEEN_TICKS);
+  window.setTimeout(func, FlashConstants.TIME_BETWEEN_CHUNKS);
 };
 
 /**
@@ -69,7 +69,7 @@ export default class FlashSourceBuffer extends videojs.EventTarget {
     // media timeline and PTS values
     this.basePtsOffset_ = NaN;
 
-    this.mediaSource = mediaSource;
+    this.mediaSource_ = mediaSource;
 
     // indicates whether the asynchronous continuation of an operation
     // is still being processed
@@ -88,10 +88,10 @@ export default class FlashSourceBuffer extends videojs.EventTarget {
         )
       )
     );
-    this.mediaSource.swfObj.vjs_appendBuffer(encodedHeader);
+    this.mediaSource_.swfObj.vjs_appendBuffer(encodedHeader);
 
     this.one('updateend', () => {
-      this.mediaSource.tech_.trigger('loadedmetadata');
+      this.mediaSource_.tech_.trigger('loadedmetadata');
     });
 
     Object.defineProperty(this, 'timestampOffset', {
@@ -104,7 +104,7 @@ export default class FlashSourceBuffer extends videojs.EventTarget {
           this.segmentParser_ = new flv.Transmuxer();
           this.segmentParser_.on('data', this.receiveBuffer_.bind(this));
           // We have to tell flash to expect a discontinuity
-          this.mediaSource.swfObj.vjs_discontinuity();
+          this.mediaSource_.swfObj.vjs_discontinuity();
           // the media <-> PTS mapping must be re-established after
           // the discontinuity
           this.basePtsOffset_ = NaN;
@@ -114,13 +114,13 @@ export default class FlashSourceBuffer extends videojs.EventTarget {
 
     Object.defineProperty(this, 'buffered', {
       get() {
-        if (!this.mediaSource ||
-            !this.mediaSource.swfObj ||
-            !('vjs_getProperty' in this.mediaSource.swfObj)) {
+        if (!this.mediaSource_ ||
+            !this.mediaSource_.swfObj ||
+            !('vjs_getProperty' in this.mediaSource_.swfObj)) {
           return videojs.createTimeRange();
         }
 
-        let buffered = this.mediaSource.swfObj.vjs_getProperty('buffered');
+        let buffered = this.mediaSource_.swfObj.vjs_getProperty('buffered');
 
         if (buffered && buffered.length) {
           buffered[0][0] = toDecimalPlaces(buffered[0][0], 3);
@@ -132,7 +132,7 @@ export default class FlashSourceBuffer extends videojs.EventTarget {
 
     // On a seek we remove all text track data since flash has no concept
     // of a buffered-range and everything else is reset on seek
-    this.mediaSource.player_.on('seeked', () => {
+    this.mediaSource_.player_.on('seeked', () => {
       removeCuesFromTrack(0, Infinity, this.metadataTrack_);
       removeCuesFromTrack(0, Infinity, this.inbandTextTrack_);
     });
@@ -159,7 +159,7 @@ export default class FlashSourceBuffer extends videojs.EventTarget {
     }
 
     this.updating = true;
-    this.mediaSource.readyState = 'open';
+    this.mediaSource_.readyState = 'open';
     this.trigger({ type: 'update' });
 
     // this is here to use recursion
@@ -184,7 +184,7 @@ export default class FlashSourceBuffer extends videojs.EventTarget {
   abort() {
     this.buffer_ = [];
     this.bufferSize_ = 0;
-    this.mediaSource.swfObj.vjs_abort();
+    this.mediaSource_.swfObj.vjs_abort();
 
     // report any outstanding updates have ended
     if (this.updating) {
@@ -217,7 +217,7 @@ export default class FlashSourceBuffer extends videojs.EventTarget {
    */
   receiveBuffer_(segment) {
     // create an in-band caption track if one is present in the segment
-    createTextTracksIfNecessary(this, this.mediaSource, segment);
+    createTextTracksIfNecessary(this, this.mediaSource_, segment);
     addTextTrackData(this, segment.captions, segment.metadata);
 
     // Do this asynchronously since convertTagsToData_ can be time consuming
@@ -241,15 +241,7 @@ export default class FlashSourceBuffer extends videojs.EventTarget {
    * @private
    */
   processBuffer_() {
-    let chunk;
-    let i;
-    let length;
-    let binary;
-    let b64str;
-    let startByte = 0;
-    let appendIterations = 0;
-    let startTime = +(new Date());
-    let appendTime;
+    let chunkSize = FlashConstants.BYTES_PER_CHUNK;
 
     if (!this.buffer_.length) {
       if (this.updating !== false) {
@@ -260,58 +252,35 @@ export default class FlashSourceBuffer extends videojs.EventTarget {
       return;
     }
 
-    do {
-      appendIterations++;
-      // concatenate appends up to the max append size
-      chunk = this.buffer_[0].subarray(startByte, startByte + this.chunkSize_);
+    // concatenate appends up to the max append size
+    let chunk = this.buffer_[0].subarray(0, chunkSize);
 
-      // requeue any bytes that won't make it this round
-      if (chunk.byteLength < this.chunkSize_ ||
-          this.buffer_[0].byteLength === startByte + this.chunkSize_) {
-        startByte = 0;
-        this.buffer_.shift();
-      } else {
-        startByte += this.chunkSize_;
-      }
-
-      this.bufferSize_ -= chunk.byteLength;
-
-      // base64 encode the bytes
-      binary = '';
-      length = chunk.byteLength;
-      for (i = 0; i < length; i++) {
-        binary += String.fromCharCode(chunk[i]);
-      }
-      b64str = window.btoa(binary);
-
-      // bypass normal ExternalInterface calls and pass xml directly
-      // IE can be slow by default
-      this.mediaSource.swfObj.CallFunction(
-        '<invoke name="vjs_appendBuffer"' +
-        'returntype="javascript"><arguments><string>' +
-        b64str +
-        '</string></arguments></invoke>'
-      );
-      appendTime = (new Date()) - startTime;
-    } while (this.buffer_.length &&
-        appendTime < FlashConstants.TIME_PER_TICK);
-
-    if (this.buffer_.length && startByte) {
-      this.buffer_[0] = this.buffer_[0].subarray(startByte);
+    // requeue any bytes that won't make it this round
+    if (chunk.byteLength < chunkSize ||
+        this.buffer_[0].byteLength === chunkSize) {
+      this.buffer_.shift();
+    } else {
+      this.buffer_[0] = this.buffer_[0].subarray(chunkSize);
     }
 
-    if (appendTime >= FlashConstants.TIME_PER_TICK) {
-      // We want to target 4 iterations per time-slot so that gives us
-      // room to adjust to changes in Flash load and other externalities
-      // such as garbage collection while still maximizing throughput
-      this.chunkSize_ = Math.floor(this.chunkSize_ * (appendIterations / 4));
-    }
+    this.bufferSize_ -= chunk.byteLength;
 
-    // We also make sure that the chunk-size doesn't drop below 1KB or
-    // go above 1MB as a sanity check
-    this.chunkSize_ = Math.max(
-      FlashConstants.MIN_CHUNK,
-      Math.min(this.chunkSize_, FlashConstants.MAX_CHUNK));
+    // base64 encode the bytes
+    let binary = '';
+    let length = chunk.byteLength;
+
+    for (let i = 0; i < length; i++) {
+      binary += String.fromCharCode(chunk[i]);
+    }
+    let b64str = window.btoa(binary);
+
+    // bypass normal ExternalInterface calls and pass xml directly
+    // IE can be slow by default
+    this.mediaSource_.swfObj.CallFunction(
+      '<invoke name="vjs_appendBuffer"' +
+      'returntype="javascript"><arguments><string>' +
+      b64str +
+      '</string></arguments></invoke>');
 
     // schedule another append if necessary
     if (this.bufferSize_ !== 0) {
@@ -334,51 +303,103 @@ export default class FlashSourceBuffer extends videojs.EventTarget {
    */
   convertTagsToData_(segmentData) {
     let segmentByteLength = 0;
-    let tech = this.mediaSource.tech_;
+    let tech = this.mediaSource_.tech_;
     let targetPts = 0;
-    let i;
-    let j;
     let segment;
-    let filteredTags = [];
-    let tags = this.getOrderedTags_(segmentData);
+    let filteredAudioTags = [];
+    let filteredVideoTags = [];
+    let videoTags = segmentData.tags.videoTags;
+    let audioTags = segmentData.tags.audioTags;
 
     // Establish the media timeline to PTS translation if we don't
     // have one already
-    if (isNaN(this.basePtsOffset_) && tags.length) {
-      this.basePtsOffset_ = tags[0].pts;
+    if (isNaN(this.basePtsOffset_) && (videoTags.length || audioTags.length)) {
+      // We know there is at least one video or audio tag, but since we may not have both,
+      // we use pts: Infinity for the missing tag. The will force the following Math.min
+      // call will to use the proper pts value since it will always be less than Infinity
+      const firstVideoTag = videoTags[0] || { pts: Infinity };
+      const firstAudioTag = audioTags[0] || { pts: Infinity };
+
+      this.basePtsOffset_ = Math.min(firstAudioTag.pts, firstVideoTag.pts);
     }
 
-    // Trim any tags that are before the end of the end of
-    // the current buffer
     if (tech.buffered().length) {
       targetPts = tech.buffered().end(0) - this.timestampOffset;
     }
+
     // Trim to currentTime if it's ahead of buffered or buffered doesn't exist
-    targetPts = Math.max(targetPts, tech.currentTime() - this.timestampOffset);
+    if (tech.seeking()) {
+      targetPts = Math.max(targetPts, tech.currentTime() - this.timestampOffset);
+    }
 
     // PTS values are represented in milliseconds
     targetPts *= 1e3;
     targetPts += this.basePtsOffset_;
 
-    // skip tags with a presentation time less than the seek target
-    for (i = 0; i < tags.length; i++) {
-      if (tags[i].pts >= targetPts) {
-        filteredTags.push(tags[i]);
+    // skip tags with a presentation time less than the seek target/end of buffer
+    for (let i = 0; i < audioTags.length; i++) {
+      if (audioTags[i].pts >= targetPts) {
+        filteredAudioTags.push(audioTags[i]);
       }
     }
 
-    if (filteredTags.length === 0) {
+    // filter complete GOPs with a presentation time less than the seek target/end of buffer
+    let startIndex = 0;
+
+    while (startIndex < videoTags.length) {
+      let startTag = videoTags[startIndex];
+
+      if (startTag.pts >= targetPts) {
+        filteredVideoTags.push(startTag);
+      } else if (startTag.keyFrame) {
+        let nextIndex = startIndex + 1;
+        let foundNextKeyFrame = false;
+
+        while (nextIndex < videoTags.length) {
+          let nextTag = videoTags[nextIndex];
+
+          if (nextTag.pts >= targetPts) {
+            break;
+          } else if (nextTag.keyFrame) {
+            foundNextKeyFrame = true;
+            break;
+          } else {
+            nextIndex++;
+          }
+        }
+
+        if (foundNextKeyFrame) {
+          // we found another key frame before the targetPts. This means it is safe
+          // to drop this entire GOP
+          startIndex = nextIndex;
+        } else {
+          // we reached the target pts or the end of the tag list before finding the
+          // next key frame. We want to append all the tags from the current key frame
+          // startTag to the targetPts to prevent trimming part of a GOP
+          while (startIndex < nextIndex) {
+            filteredVideoTags.push(videoTags[startIndex]);
+            startIndex++;
+          }
+        }
+        continue;
+      }
+      startIndex++;
+    }
+
+    let tags = this.getOrderedTags_(filteredVideoTags, filteredAudioTags);
+
+    if (tags.length === 0) {
       return;
     }
 
     // concatenate the bytes into a single segment
-    for (i = 0; i < filteredTags.length; i++) {
-      segmentByteLength += filteredTags[i].bytes.byteLength;
+    for (let i = 0; i < tags.length; i++) {
+      segmentByteLength += tags[i].bytes.byteLength;
     }
     segment = new Uint8Array(segmentByteLength);
-    for (i = 0, j = 0; i < filteredTags.length; i++) {
-      segment.set(filteredTags[i].bytes, j);
-      j += filteredTags[i].bytes.byteLength;
+    for (let i = 0, j = 0; i < tags.length; i++) {
+      segment.set(tags[i].bytes, j);
+      j += tags[i].bytes.byteLength;
     }
 
     return segment;
@@ -388,11 +409,10 @@ export default class FlashSourceBuffer extends videojs.EventTarget {
    * Assemble the FLV tags in decoder order.
    *
    * @private
-   * @param {Object} segmentData object of segment data
+   * @param {Array} videoTags list of video tags
+   * @param {Array} audioTags list of audio tags
    */
-  getOrderedTags_(segmentData) {
-    let videoTags = segmentData.tags.videoTags;
-    let audioTags = segmentData.tags.audioTags;
+  getOrderedTags_(videoTags, audioTags) {
     let tag;
     let tags = [];
 
